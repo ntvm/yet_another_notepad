@@ -15,3 +15,10 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
 ] }
+
+[profile.release]
+opt-level = "z"      # Оптимизация по размеру (z = максимально компактно)
+lto = true           # Link Time Optimization (выкидывает вообще весь неиспользуемый код из всех либ)
+codegen-units = 1    # Позволяет LTO работать еще эффективнее
+panic = "abort"      # Убирает тяжелый код "разматывания стека" при ошибках
+strip = true         # Убирает всю отладочную информацию и символы (аналог -s -w в Go)
