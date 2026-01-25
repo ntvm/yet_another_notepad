@@ -54,6 +54,16 @@ fn main() -> Result<()> {
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            // --- 🔥 ПЕРЕХВАТ Ctrl+A 🔥 ---
+            if message.message == WM_KEYDOWN && message.wParam.0 == 0x41 { // 0x41 = 'A'
+                if (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 {
+                    if !HWND_EDIT.0.is_null() {
+                        // EM_SETSEL: 0 - начало, -1 - конец (выделить всё)
+                        let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1));
+                    }
+                }
+            }
+
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -166,15 +176,12 @@ unsafe fn toggle_word_wrap(hwnd: HWND) {
 unsafe fn update_font() {
     if !HWND_EDIT.0.is_null() {
         if !CURRENT_FONT.0.is_null() { let _ = DeleteObject(CURRENT_FONT); }
-        
-        // CreateFontW возвращает HFONT напрямую, unwrap() не нужен
         let h_font = CreateFontW(
             CURRENT_FONT_SIZE, 0, 0, 0, 400, 0, 0, 0, 
             DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, 
             CLIP_DEFAULT_PRECIS.0 as u32, CLEARTYPE_QUALITY.0 as u32, 
             VARIABLE_PITCH.0 as u32, w!("Consolas")
         );
-        
         CURRENT_FONT = h_font;
         let _ = SendMessageW(HWND_EDIT, WM_SETFONT, WPARAM(h_font.0 as usize), LPARAM(1));
     }
