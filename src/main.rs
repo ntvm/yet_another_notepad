@@ -21,7 +21,8 @@ static mut HWND_REP: HWND = HWND(null_mut());
 
 static mut CURRENT_FONT_SIZE: i32 = 24;
 static mut CURRENT_FONT: HFONT = HFONT(null_mut());
-static mut IS_WORD_WRAP: bool = true; // Word Wrap по дефолту
+static mut IS_WORD_WRAP: bool = true;
+static mut LAST_SEARCH_IDX: usize = 0; // Для "Find Next"
 
 const ID_EDIT: i32 = 101;
 const IDM_OPEN: usize = 1001;
@@ -31,6 +32,7 @@ const IDM_WRAP: usize = 1004;
 const IDM_REGEX_SHOW: usize = 1005;
 const ID_BTN_REPLACE: usize = 2001;
 const ID_BTN_FILTER: usize = 2002;
+const ID_BTN_FIND: usize = 2003; // Новая кнопка
 const MK_CONTROL: u32 = 0x0008;
 
 fn main() -> Result<()> {
@@ -59,7 +61,7 @@ fn main() -> Result<()> {
         };
         RegisterClassW(&rc);
 
-        let _hwnd = CreateWindowExW(
+        let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             window_class,
             w!("Vibecoded Notepad + Regex"),
@@ -68,21 +70,27 @@ fn main() -> Result<()> {
             None, None, instance, None,
         )?;
 
-let mut message = MSG::default();
+        let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             let mut handled = false;
-
-            // --- 🔥 ПЕРЕХВАТ Ctrl+A БЕЗ ПИСКА 🔥 ---
-            if message.message == WM_KEYDOWN && message.wParam.0 == 0x41 { // 0x41 = 'A'
-                if (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 {
-                    if !HWND_EDIT.0.is_null() {
-                        let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1));
-                        handled = true; // Помечаем, что сообщение обработано
+            if message.message == WM_KEYDOWN {
+                let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+                match message.wParam.0 as u16 {
+                    0x41 if ctrl => { // Ctrl+A
+                        if !HWND_EDIT.0.is_null() {
+                            let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1));
+                            handled = true;
+                        }
                     }
+                    0x46 if ctrl => { // Ctrl+F
+                        show_regex_win(hwnd);
+                        let _ = SetFocus(HWND_PAT);
+                        handled = true;
+                    }
+                    _ => {}
                 }
             }
 
-            // Если сообщение НЕ было обработано нами (не Ctrl+A), пускаем дальше
             if !handled {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -135,7 +143,7 @@ unsafe fn setup_ui(hwnd: HWND) {
             let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_SAVE, w!("Save"));
             let _ = AppendMenuW(h_file_menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_WRAP, if IS_WORD_WRAP { w!("✔ Word Wrap") } else { w!("Word Wrap") });
-            let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_REGEX_SHOW, w!("Regex Tools"));
+            let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_REGEX_SHOW, w!("Regex/Find (Ctrl+F)"));
             let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_EXIT, w!("Exit"));
             let _ = AppendMenuW(h_menu, MF_POPUP, h_file_menu.0 as usize, w!("File"));
             let _ = SetMenu(hwnd, h_menu);
@@ -143,7 +151,6 @@ unsafe fn setup_ui(hwnd: HWND) {
     }
     let mut style = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32);
     if !IS_WORD_WRAP { style |= WS_HSCROLL | WINDOW_STYLE(ES_AUTOHSCROLL as u32); }
-    
     if let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("EDIT"), PCWSTR::null(), style, 0, 0, 0, 0, hwnd, HMENU(ID_EDIT as *mut _), instance, None) {
         HWND_EDIT = h;
         update_font();
@@ -153,17 +160,15 @@ unsafe fn setup_ui(hwnd: HWND) {
 unsafe fn show_regex_win(hwnd: HWND) {
     if HWND_REGEX_WIN.0.is_null() {
         let instance = GetModuleHandleW(None).unwrap();
-        HWND_REGEX_WIN = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0), w!("RegexToolWin"), w!("Regex Tools"), WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 350, 200, hwnd, None, instance, None).unwrap();
-        
-        // Исправлено: убрали Some(), используем w!() напрямую
+        HWND_REGEX_WIN = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0), w!("RegexToolWin"), w!("Regex & Find"), WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 350, 230, hwnd, None, instance, None).unwrap();
         let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("Pattern:"), WS_CHILD | WS_VISIBLE, 10, 10, 300, 20, HWND_REGEX_WIN, None, instance, None);
         HWND_PAT = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), PCWSTR::null(), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 30, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
-        
         let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("Replace with:"), WS_CHILD | WS_VISIBLE, 10, 60, 300, 20, HWND_REGEX_WIN, None, instance, None);
         HWND_REP = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), PCWSTR::null(), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 80, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
         
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Replace All"), WS_CHILD | WS_VISIBLE, 10, 120, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_REPLACE as *mut _), instance, None);
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Filter Lines"), WS_CHILD | WS_VISIBLE, 170, 120, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FILTER as *mut _), instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Find Next"), WS_CHILD | WS_VISIBLE, 10, 120, 310, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FIND as *mut _), instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Replace All"), WS_CHILD | WS_VISIBLE, 10, 155, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_REPLACE as *mut _), instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Filter Lines"), WS_CHILD | WS_VISIBLE, 170, 155, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FILTER as *mut _), instance, None);
     }
     let _ = ShowWindow(HWND_REGEX_WIN, SW_SHOW);
 }
@@ -174,6 +179,7 @@ unsafe extern "system" fn regex_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             match wparam.0 {
                 ID_BTN_REPLACE => run_regex(false),
                 ID_BTN_FILTER => run_regex(true),
+                ID_BTN_FIND => find_next(),
                 _ => {}
             }
             LRESULT(0)
@@ -183,11 +189,34 @@ unsafe extern "system" fn regex_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
     }
 }
 
+unsafe fn find_next() {
+    let pat = get_text(HWND_PAT);
+    let content = get_text(HWND_EDIT);
+    if let Ok(re) = Regex::new(&pat) {
+        // Ищем начиная с LAST_SEARCH_IDX
+        if let Some(m) = re.find_at(&content, LAST_SEARCH_IDX).or_else(|| re.find(&content)) {
+            let start = m.start();
+            let end = m.end();
+            
+            // Конвертируем байтовые смещения Rust в символьные смещения Win32 (UTF-16)
+            let char_start = content[..start].encode_utf16().count();
+            let char_end = content[..end].encode_utf16().count();
+            
+            let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(char_start), LPARAM(char_end as isize));
+            let _ = SendMessageW(HWND_EDIT, EM_SCROLLCARET, WPARAM(0), LPARAM(0));
+            
+            LAST_SEARCH_IDX = end; // Запоминаем для следующего раза
+        } else {
+            let _ = MessageBoxW(HWND_REGEX_WIN, w!("No matches found!"), w!("Find"), MB_ICONINFORMATION);
+            LAST_SEARCH_IDX = 0;
+        }
+    }
+}
+
 unsafe fn run_regex(filter_mode: bool) {
     let pat = get_text(HWND_PAT);
     let rep = get_text(HWND_REP);
     let content = get_text(HWND_EDIT);
-    
     if let Ok(re) = Regex::new(&pat) {
         let new_content = if filter_mode {
             content.lines().filter(|line| re.is_match(line)).collect::<Vec<_>>().join("\r\n")
@@ -197,8 +226,6 @@ unsafe fn run_regex(filter_mode: bool) {
         let mut wide: Vec<u16> = new_content.encode_utf16().collect();
         wide.push(0);
         let _ = SetWindowTextW(HWND_EDIT, PCWSTR(wide.as_ptr()));
-    } else {
-        let _ = MessageBoxW(HWND_REGEX_WIN, w!("Invalid Regex Pattern!"), w!("Error"), MB_ICONERROR);
     }
 }
 
