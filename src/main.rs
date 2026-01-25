@@ -21,7 +21,7 @@ static mut HWND_REP: HWND = HWND(null_mut());
 
 static mut CURRENT_FONT_SIZE: i32 = 24;
 static mut CURRENT_FONT: HFONT = HFONT(null_mut());
-static mut IS_WORD_WRAP: bool = true; // ТЕПЕРЬ ПО ДЕФОЛТУ
+static mut IS_WORD_WRAP: bool = true; // Word Wrap по дефолту
 
 const ID_EDIT: i32 = 101;
 const IDM_OPEN: usize = 1001;
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
             hInstance: instance.into(),
             lpszClassName: window_class,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut core::ffi::c_void),
+            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
             ..Default::default()
         };
         RegisterClassW(&wc);
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
             hInstance: instance.into(),
             lpszClassName: regex_class,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as *mut core::ffi::c_void),
+            hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as *mut _),
             ..Default::default()
         };
         RegisterClassW(&rc);
@@ -70,6 +70,7 @@ fn main() -> Result<()> {
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            // Перехват Ctrl+A
             if message.message == WM_KEYDOWN && message.wParam.0 == 0x41 {
                 if (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 {
                     if !HWND_EDIT.0.is_null() { let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1)); }
@@ -125,7 +126,7 @@ unsafe fn setup_ui(hwnd: HWND) {
             let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_SAVE, w!("Save"));
             let _ = AppendMenuW(h_file_menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_WRAP, if IS_WORD_WRAP { w!("✔ Word Wrap") } else { w!("Word Wrap") });
-            let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_REGEX_SHOW, w!("Regex Tools (Ctrl+R)"));
+            let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_REGEX_SHOW, w!("Regex Tools"));
             let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_EXIT, w!("Exit"));
             let _ = AppendMenuW(h_menu, MF_POPUP, h_file_menu.0 as usize, w!("File"));
             let _ = SetMenu(hwnd, h_menu);
@@ -133,7 +134,8 @@ unsafe fn setup_ui(hwnd: HWND) {
     }
     let mut style = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32);
     if !IS_WORD_WRAP { style |= WS_HSCROLL | WINDOW_STYLE(ES_AUTOHSCROLL as u32); }
-    if let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("EDIT"), None, style, 0, 0, 0, 0, hwnd, HMENU(ID_EDIT as *mut _), instance, None) {
+    
+    if let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("EDIT"), PCWSTR::null(), style, 0, 0, 0, 0, hwnd, HMENU(ID_EDIT as *mut _), instance, None) {
         HWND_EDIT = h;
         update_font();
     }
@@ -143,12 +145,16 @@ unsafe fn show_regex_win(hwnd: HWND) {
     if HWND_REGEX_WIN.0.is_null() {
         let instance = GetModuleHandleW(None).unwrap();
         HWND_REGEX_WIN = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0), w!("RegexToolWin"), w!("Regex Tools"), WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 350, 200, hwnd, None, instance, None).unwrap();
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), Some(w!("Pattern:")), WS_CHILD | WS_VISIBLE, 10, 10, 300, 20, HWND_REGEX_WIN, None, instance, None);
-        HWND_PAT = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), None, WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 30, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), Some(w!("Replace with:")), WS_CHILD | WS_VISIBLE, 10, 60, 300, 20, HWND_REGEX_WIN, None, instance, None);
-        HWND_REP = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), None, WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 80, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), Some(w!("Replace All")), WS_CHILD | WS_VISIBLE, 10, 120, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_REPLACE as *mut _), instance, None);
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), Some(w!("Filter Lines")), WS_CHILD | WS_VISIBLE, 170, 120, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FILTER as *mut _), instance, None);
+        
+        // Исправлено: убрали Some(), используем w!() напрямую
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("Pattern:"), WS_CHILD | WS_VISIBLE, 10, 10, 300, 20, HWND_REGEX_WIN, None, instance, None);
+        HWND_PAT = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), PCWSTR::null(), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 30, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
+        
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("Replace with:"), WS_CHILD | WS_VISIBLE, 10, 60, 300, 20, HWND_REGEX_WIN, None, instance, None);
+        HWND_REP = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), PCWSTR::null(), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 80, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
+        
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Replace All"), WS_CHILD | WS_VISIBLE, 10, 120, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_REPLACE as *mut _), instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Filter Lines"), WS_CHILD | WS_VISIBLE, 170, 120, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FILTER as *mut _), instance, None);
     }
     let _ = ShowWindow(HWND_REGEX_WIN, SW_SHOW);
 }
