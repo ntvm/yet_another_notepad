@@ -17,14 +17,14 @@ use windows::{
 static mut HWND_EDIT: HWND = HWND(null_mut());
 static mut CURRENT_FONT_SIZE: i32 = 24;
 static mut CURRENT_FONT: HFONT = HFONT(null_mut());
-static mut IS_WORD_WRAP: bool = false; // Состояние переноса слов
+static mut IS_WORD_WRAP: bool = false;
 
 // Константы
 const ID_EDIT: i32 = 101;
 const IDM_OPEN: usize = 1001;
 const IDM_SAVE: usize = 1002;
 const IDM_EXIT: usize = 1003;
-const IDM_WRAP: usize = 1004; // Новая кнопка
+const IDM_WRAP: usize = 1004;
 const MK_CONTROL: u32 = 0x0008; 
 
 fn main() -> Result<()> {
@@ -68,7 +68,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             setup_ui(hwnd);
             LRESULT(0)
         }
-        
         WM_SIZE => {
             let width = (lparam.0 & 0xFFFF) as i32;
             let height = ((lparam.0 >> 16) & 0xFFFF) as i32;
@@ -77,12 +76,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
-        
         WM_SETFOCUS => {
             if !HWND_EDIT.0.is_null() { let _ = SetFocus(HWND_EDIT); }
             LRESULT(0)
         }
-
         WM_COMMAND => {
             let id = wparam.0 & 0xFFFF;
             match id as usize {
@@ -94,7 +91,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
-
         WM_MOUSEWHEEL => {
             let keys = (wparam.0 & 0xFFFF) as u32;
             if (keys & MK_CONTROL) != 0 {
@@ -106,7 +102,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
-
         WM_DESTROY => {
             if !CURRENT_FONT.0.is_null() { let _ = DeleteObject(CURRENT_FONT); }
             PostQuitMessage(0);
@@ -119,7 +114,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 unsafe fn setup_ui(hwnd: HWND) {
     let instance = GetModuleHandleW(None).unwrap();
     
-    // Меню
     if let Ok(h_menu) = CreateMenu() {
         if let Ok(h_file_menu) = CreateMenu() {
             let _ = AppendMenuW(h_file_menu, MF_STRING, IDM_OPEN, w!("Open"));
@@ -132,14 +126,12 @@ unsafe fn setup_ui(hwnd: HWND) {
         }
     }
 
-    // Стили EDIT
-    // Если Wrap выключен — добавляем горизонтальный скролл и авто-скролл по горизонтали
     let mut style = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32);
     if !IS_WORD_WRAP {
         style |= WS_HSCROLL | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
     }
 
-    HWND_EDIT = CreateWindowExW(
+    if let Ok(h) = CreateWindowExW(
         WINDOW_EX_STYLE::default(),
         w!("EDIT"),
         None,
@@ -149,29 +141,22 @@ unsafe fn setup_ui(hwnd: HWND) {
         HMENU(ID_EDIT as *mut core::ffi::c_void),
         instance,
         None,
-    ).unwrap();
-
-    update_font();
+    ) {
+        HWND_EDIT = h;
+        update_font();
+    }
 }
 
 unsafe fn toggle_word_wrap(hwnd: HWND) {
     IS_WORD_WRAP = !IS_WORD_WRAP;
-
-    // 1. Сохраняем текст
     let len = GetWindowTextLengthW(HWND_EDIT);
     let mut buffer = vec![0u16; (len + 1) as usize];
     GetWindowTextW(HWND_EDIT, &mut buffer);
 
-    // 2. Удаляем старое окно
     let _ = DestroyWindow(HWND_EDIT);
-
-    // 3. Создаем новое с новыми стилями
     setup_ui(hwnd);
 
-    // 4. Возвращаем текст
     let _ = SetWindowTextW(HWND_EDIT, PCWSTR(buffer.as_ptr()));
-
-    // 5. Подгоняем размер под текущее окно
     let mut rect = RECT::default();
     let _ = GetClientRect(hwnd, &mut rect);
     let _ = MoveWindow(HWND_EDIT, 0, 0, rect.right, rect.bottom, true);
@@ -181,18 +166,20 @@ unsafe fn toggle_word_wrap(hwnd: HWND) {
 unsafe fn update_font() {
     if !HWND_EDIT.0.is_null() {
         if !CURRENT_FONT.0.is_null() { let _ = DeleteObject(CURRENT_FONT); }
+        
+        // CreateFontW возвращает HFONT напрямую, unwrap() не нужен
         let h_font = CreateFontW(
             CURRENT_FONT_SIZE, 0, 0, 0, 400, 0, 0, 0, 
             DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, 
             CLIP_DEFAULT_PRECIS.0 as u32, CLEARTYPE_QUALITY.0 as u32, 
             VARIABLE_PITCH.0 as u32, w!("Consolas")
-        ).unwrap();
+        );
+        
         CURRENT_FONT = h_font;
         let _ = SendMessageW(HWND_EDIT, WM_SETFONT, WPARAM(h_font.0 as usize), LPARAM(1));
     }
 }
 
-// Функции open_file и save_file остаются без изменений...
 unsafe fn open_file(hwnd: HWND) {
     let mut filename = [0u16; 260];
     let mut ofn = OPENFILENAMEW {
