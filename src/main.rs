@@ -160,15 +160,16 @@ unsafe fn setup_ui(hwnd: HWND) {
 unsafe fn show_regex_win(hwnd: HWND) {
     if HWND_REGEX_WIN.0.is_null() {
         let instance = GetModuleHandleW(None).unwrap();
-        HWND_REGEX_WIN = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0), w!("RegexToolWin"), w!("Regex & Find"), WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 350, 230, hwnd, None, instance, None).unwrap();
+        HWND_REGEX_WIN = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0), w!("RegexToolWin"), w!("Regex & Find"), WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 350, 215, hwnd, None, instance, None).unwrap();
         let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("Pattern:"), WS_CHILD | WS_VISIBLE, 10, 10, 300, 20, HWND_REGEX_WIN, None, instance, None);
         HWND_PAT = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), PCWSTR::null(), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 30, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
         let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("Replace with:"), WS_CHILD | WS_VISIBLE, 10, 60, 300, 20, HWND_REGEX_WIN, None, instance, None);
         HWND_REP = CreateWindowExW(WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0), w!("EDIT"), PCWSTR::null(), WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 10, 80, 310, 25, HWND_REGEX_WIN, None, instance, None).unwrap();
         
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Find Next"), WS_CHILD | WS_VISIBLE, 10, 120, 310, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FIND as *mut _), instance, None);
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Replace All"), WS_CHILD | WS_VISIBLE, 10, 155, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_REPLACE as *mut _), instance, None);
-        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Filter Lines"), WS_CHILD | WS_VISIBLE, 170, 155, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FILTER as *mut _), instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("(Press Enter to search)"), WS_CHILD | WS_VISIBLE, 10, 110, 310, 15, HWND_REGEX_WIN, None, instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Find Next (Enter)"), WS_CHILD | WS_VISIBLE, 10, 130, 310, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FIND as *mut _), instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Replace All"), WS_CHILD | WS_VISIBLE, 10, 165, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_REPLACE as *mut _), instance, None);
+        let _ = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("Filter Lines"), WS_CHILD | WS_VISIBLE, 170, 165, 150, 30, HWND_REGEX_WIN, HMENU(ID_BTN_FILTER as *mut _), instance, None);
     }
     let _ = ShowWindow(HWND_REGEX_WIN, SW_SHOW);
 }
@@ -184,14 +185,33 @@ unsafe extern "system" fn regex_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             }
             LRESULT(0)
         }
+        WM_KEYDOWN => {
+            let key_code = wparam.0 as u16;
+            // Обработка Enter в поле pattern для поиска
+            if key_code == VK_RETURN.0 as u16 {
+                if GetFocus() == HWND_PAT || GetFocus() == HWND_REP {
+                    find_next_auto();
+                    return LRESULT(0);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_CLOSE => { let _ = ShowWindow(hwnd, SW_HIDE); LRESULT(0) }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
 unsafe fn find_next() {
+    LAST_SEARCH_IDX = 0; // Начинаем с начала при нажатии кнопки
+    find_next_auto();
+}
+
+unsafe fn find_next_auto() {
     let pat = get_text(HWND_PAT);
     let content = get_text(HWND_EDIT);
+    if pat.is_empty() {
+        return;
+    }
     if let Ok(re) = Regex::new(&pat) {
         // Ищем начиная с LAST_SEARCH_IDX
         if let Some(m) = re.find_at(&content, LAST_SEARCH_IDX).or_else(|| re.find(&content)) {
@@ -202,13 +222,13 @@ unsafe fn find_next() {
             let char_start = content[..start].encode_utf16().count();
             let char_end = content[..end].encode_utf16().count();
             
+            // Выделяем найденный текст
             let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(char_start), LPARAM(char_end as isize));
             let _ = SendMessageW(HWND_EDIT, EM_SCROLLCARET, WPARAM(0), LPARAM(0));
             
             LAST_SEARCH_IDX = end; // Запоминаем для следующего раза
         } else {
-            let _ = MessageBoxW(HWND_REGEX_WIN, w!("No matches found!"), w!("Find"), MB_ICONINFORMATION);
-            LAST_SEARCH_IDX = 0;
+            LAST_SEARCH_IDX = 0; // Если нет совпадений, начинаем с начала
         }
     }
 }
