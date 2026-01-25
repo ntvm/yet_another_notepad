@@ -68,16 +68,25 @@ fn main() -> Result<()> {
             None, None, instance, None,
         )?;
 
-        let mut message = MSG::default();
+let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
-            // Перехват Ctrl+A
-            if message.message == WM_KEYDOWN && message.wParam.0 == 0x41 {
+            let mut handled = false;
+
+            // --- 🔥 ПЕРЕХВАТ Ctrl+A БЕЗ ПИСКА 🔥 ---
+            if message.message == WM_KEYDOWN && message.wParam.0 == 0x41 { // 0x41 = 'A'
                 if (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 {
-                    if !HWND_EDIT.0.is_null() { let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1)); }
+                    if !HWND_EDIT.0.is_null() {
+                        let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1));
+                        handled = true; // Помечаем, что сообщение обработано
+                    }
                 }
             }
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
+
+            // Если сообщение НЕ было обработано нами (не Ctrl+A), пускаем дальше
+            if !handled {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
         }
         Ok(())
     }
