@@ -1,12 +1,16 @@
-#![windows_subsystem = "windows"] // Чтобы не открывалась консоль
+#![windows_subsystem = "windows"]
 
 use windows::{
     core::*,
     Win32::Foundation::*,
-    Win32::Graphics::GDI::*,
+    Win32::Graphics::Gdi::*, // Исправлено: Gdi
     Win32::System::LibraryLoader::GetModuleHandleW,
     Win32::UI::WindowsAndMessaging::*,
+    Win32::UI::Controls::*,
 };
+
+// Используем HWND(0) для инициализации
+static mut HWND_EDIT: HWND = HWND(0);
 
 fn main() -> Result<()> {
     unsafe {
@@ -24,8 +28,7 @@ fn main() -> Result<()> {
 
         RegisterClassW(&wc);
 
-        // Создаем главное окно
-        let hwnd = CreateWindowExW(
+        let _hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             window_class,
             w!("Minimal Notepad"),
@@ -44,32 +47,28 @@ fn main() -> Result<()> {
     }
 }
 
-// Идентификатор нашего текстового поля
-const ID_EDIT: i32 = 101;
-
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    static mut HWND_EDIT: HWND = HWND(0);
-
     match msg {
         WM_CREATE => {
             let instance = GetModuleHandleW(None).unwrap();
-            // Создаем встроенный системный текстовый редактор
+            
+            // Создаем системный контрол EDIT
             HWND_EDIT = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                w!("EDIT"), // Системный класс "EDIT"
+                w!("EDIT"),
                 None,
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | 
-                WINDOW_STYLE(ES_MULTILINE as u32) | WINDOW_STYLE(ES_AUTOVSCROLL as u32),
+                WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32),
                 0, 0, 0, 0,
                 hwnd,
-                HMENU(ID_EDIT as isize),
+                HMENU(101 as isize),
                 instance,
                 None,
             );
 
-            // Устанавливаем нормальный шрифт (Consolas), а не системный по умолчанию
+            // Устанавливаем шрифт Consolas
             let h_font = CreateFontW(
-                20, 0, 0, 0, 400, 0, 0, 0, 
+                19, 0, 0, 0, 400, 0, 0, 0, 
                 DEFAULT_CHARSET.0 as u32, 
                 OUT_DEFAULT_PRECIS.0 as u32, 
                 CLIP_DEFAULT_PRECIS.0 as u32, 
@@ -81,7 +80,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_SIZE => {
-            // Растягиваем текстовое поле на все окно
             let width = (lparam.0 & 0xFFFF) as i32;
             let height = ((lparam.0 >> 16) & 0xFFFF) as i32;
             MoveWindow(HWND_EDIT, 0, 0, width, height, true);
