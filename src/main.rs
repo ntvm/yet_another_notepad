@@ -14,16 +14,9 @@ use windows::{
     Win32::UI::Controls::*,
 };
 
-// --- ХЕЛПЕРЫ ДЛЯ СТРОК (Чтобы не корежило код) ---
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-unsafe fn set_text(h: HWND, s: &str) {
-    let wide = to_wide(s);
-    let _ = SetWindowTextW(h, PCWSTR(wide.as_ptr()));
-}
-
+// --- ХЕЛПЕРЫ ---
+fn to_wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() }
+unsafe fn set_text(h: HWND, s: &str) { let _ = SetWindowTextW(h, PCWSTR(to_wide(s).as_ptr())); }
 unsafe fn get_text(h: HWND) -> String {
     let len = GetWindowTextLengthW(h);
     if len == 0 { return String::new(); }
@@ -32,7 +25,6 @@ unsafe fn get_text(h: HWND) -> String {
     String::from_utf16_lossy(&buf[..actual as usize])
 }
 
-// --- ГЛОБАЛКИ ---
 static mut HWND_EDIT: HWND = HWND(null_mut());
 static mut HWND_REGEX_WIN: HWND = HWND(null_mut());
 static mut HWND_PAT: HWND = HWND(null_mut());
@@ -41,6 +33,7 @@ static mut CURRENT_FONT_SIZE: i32 = 24;
 static mut CURRENT_FONT: HFONT = HFONT(null_mut());
 static mut IS_WORD_WRAP: bool = true;
 static mut LAST_SEARCH_IDX: usize = 0;
+static mut LAST_PATTERN: String = String::new();
 
 const ID_EDIT: i32 = 101;
 const IDM_OPEN: usize = 1001;
@@ -86,22 +79,12 @@ fn main() -> Result<()> {
             if message.message == WM_KEYDOWN {
                 let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
                 match message.wParam.0 as u16 {
-                    0x41 if ctrl => { // Ctrl+A
-                        let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1));
-                        handled = true;
-                    }
-                    0x46 if ctrl => { // Ctrl+F
-                        show_regex_win(hwnd);
-                        let _ = SetFocus(HWND_PAT);
-                        handled = true;
-                    }
+                    0x41 if ctrl => { let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1)); handled = true; }
+                    0x46 if ctrl => { show_regex_win(hwnd); let _ = SetFocus(HWND_PAT); handled = true; }
                     _ => {}
                 }
             }
-            if !handled {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            if !handled { let _ = TranslateMessage(&message); DispatchMessageW(&message); }
         }
         Ok(())
     }
@@ -154,7 +137,8 @@ unsafe fn setup_ui(hwnd: HWND) {
             let _ = SetMenu(hwnd, m);
         }
     }
-    let mut st = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32);
+    // 🔥 ДОБАВЛЕН ES_NOHIDESEL чтобы выделение не пропадало при потере фокуса
+    let mut st = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_NOHIDESEL as u32);
     if !IS_WORD_WRAP { st |= WS_HSCROLL | WINDOW_STYLE(ES_AUTOHSCROLL as u32); }
     if let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("EDIT"), PCWSTR::null(), st, 0, 0, 0, 0, hwnd, HMENU(ID_EDIT as *mut _), inst, None) {
         HWND_EDIT = h;
@@ -196,13 +180,32 @@ unsafe extern "system" fn regex_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
 unsafe fn find_next_auto() {
     let (pat, content) = (get_text(HWND_PAT), get_text(HWND_EDIT));
     if pat.is_empty() { return; }
+
+    // Если паттерн изменился, сбрасываем поиск в начало
+    if pat != LAST_PATTERN {
+        LAST_PATTERN = pat.clone();
+        LAST_SEARCH_IDX = 0;
+    }
+
     if let Ok(re) = Regex::new(&pat) {
+        // Ищем начиная с LAST_SEARCH_IDX (байтовое смещение)
         if let Some(m) = re.find_at(&content, LAST_SEARCH_IDX).or_else(|| re.find(&content)) {
-            let (s, e) = (content[..m.start()].encode_utf16().count(), content[..m.end()].encode_utf16().count());
-            let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(s), LPARAM(e as isize));
+            // Конвертируем байты в символы UTF-16 для Win32
+            let start_char = content[..m.start()].encode_utf16().count();
+            let end_char = content[..m.end()].encode_utf16().count();
+
+            // Выделяем и скроллим
+            let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(start_char), LPARAM(end_char as isize));
             let _ = SendMessageW(HWND_EDIT, EM_SCROLLCARET, WPARAM(0), LPARAM(0));
-            LAST_SEARCH_IDX = m.end();
-        } else { LAST_SEARCH_IDX = 0; }
+            
+            // Переводим фокус на основное окно, чтобы видеть курсор (опционально)
+            // let _ = SetFocus(HWND_EDIT);
+
+            LAST_SEARCH_IDX = m.end(); // Запоминаем байтовую позицию для следующего шага
+        } else {
+            // Если ничего не нашли дальше, сбрасываем индекс для "зацикливания"
+            LAST_SEARCH_IDX = 0;
+        }
     }
 }
 
