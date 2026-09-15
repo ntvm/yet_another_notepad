@@ -1,6 +1,10 @@
 #![windows_subsystem = "windows"]
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Write, Seek, SeekFrom};
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::process::Command;
 use std::ptr::null_mut;
 use regex::Regex;
 use windows::{
@@ -25,6 +29,7 @@ unsafe fn get_text(h: HWND) -> String {
     String::from_utf16_lossy(&buf[..actual as usize])
 }
 
+// --- ГЛОБАЛЬНЫЙ СТЕЙТ ---
 static mut HWND_EDIT: HWND = HWND(null_mut());
 static mut HWND_REGEX_WIN: HWND = HWND(null_mut());
 static mut HWND_PAT: HWND = HWND(null_mut());
@@ -34,6 +39,11 @@ static mut CURRENT_FONT: HFONT = HFONT(null_mut());
 static mut IS_WORD_WRAP: bool = true;
 static mut LAST_SEARCH_IDX: usize = 0;
 static mut LAST_PATTERN: String = String::new();
+
+// --- СТЕЙТ ДЛЯ МУСОРНИКА ---
+static mut CURRENT_FILE: Option<PathBuf> = None;
+static mut FILE_LOCK: Option<std::fs::File> = None;
+static mut IS_DIRTY: bool = false;
 
 const ID_EDIT: i32 = 101;
 const IDM_OPEN: usize = 1001;
@@ -45,8 +55,57 @@ const ID_BTN_REPLACE: usize = 2001;
 const ID_BTN_FILTER: usize = 2002;
 const ID_BTN_FIND: usize = 2003;
 
+// Win32 Константы, которых может не быть в базовом импорте
+const EM_SETLIMITTEXT: u32 = 0x00C5;
+const EN_CHANGE: u16 = 0x0300;
+const FILE_SHARE_READ: u32 = 1;
+
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let dumpster_dir = "C:\\Dumpster";
+    fs::create_dir_all(dumpster_dir).ok();
+
     unsafe {
+        // МАГИЯ АВТОРЕОТКРЫТИЯ И ЛОКОВ
+        if args.len() > 1 {
+            // Запущен с конкретным файлом (форк)
+            let path = PathBuf::from(&args[1]);
+            if let Ok(f) = OpenOptions::new().read(true).write(true).create(true).share_mode(FILE_SHARE_READ).open(&path) {
+                CURRENT_FILE = Some(path);
+                FILE_LOCK = Some(f);
+            }
+        } else {
+            // Запущен вслепую (Win+R). Ищем бесхозные файлы.
+            if let Ok(entries) = fs::read_dir(dumpster_dir) {
+                let mut first_found = false;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("txt") {
+                        // Пытаемся захватить файл (если он открыт другим окном, будет ошибка доступа)
+                        if let Ok(f) = OpenOptions::new().read(true).write(true).share_mode(FILE_SHARE_READ).open(&path) {
+                            if !first_found {
+                                CURRENT_FILE = Some(path.clone());
+                                FILE_LOCK = Some(f);
+                                first_found = true;
+                            } else {
+                                // Нашли еще один свободный файл -> форкаем процесс для него
+                                Command::new(&args[0]).arg(&path).spawn().ok();
+                            }
+                        }
+                    }
+                }
+            }
+            // Если все файлы заняты (или их нет), создаем новый
+            if CURRENT_FILE.is_none() {
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+                let path = PathBuf::from(format!("{}\\dump_{}.txt", dumpster_dir, ts));
+                if let Ok(f) = OpenOptions::new().read(true).write(true).create(true).share_mode(FILE_SHARE_READ).open(&path) {
+                    CURRENT_FILE = Some(path);
+                    FILE_LOCK = Some(f);
+                }
+            }
+        }
+
         let instance = GetModuleHandleW(None)?;
         let window_class = w!("MyMinimalNotepad");
         let regex_class = w!("RegexToolWin");
@@ -71,7 +130,14 @@ fn main() -> Result<()> {
         };
         RegisterClassW(&rc);
 
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE::default(), window_class, w!("Vibecoded Notepad"), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 900, 700, None, None, instance, None)?;
+        // Ставим имя файла в заголовок
+        let title = if let Some(p) = &CURRENT_FILE {
+            format!("Dumpster - {}", p.file_name().unwrap().to_string_lossy())
+        } else {
+            "Dumpster".to_string()
+        };
+
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE::default(), window_class, PCWSTR(to_wide(&title).as_ptr()), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 900, 700, None, None, instance, None)?;
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
@@ -81,6 +147,7 @@ fn main() -> Result<()> {
                 match message.wParam.0 as u16 {
                     0x41 if ctrl => { let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(0), LPARAM(-1)); handled = true; }
                     0x46 if ctrl => { show_regex_win(hwnd); let _ = SetFocus(HWND_PAT); handled = true; }
+                    0x53 if ctrl => { save_current_state(); handled = true; } // Ctrl+S принудительно
                     _ => {}
                 }
             }
@@ -92,7 +159,12 @@ fn main() -> Result<()> {
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_CREATE => { setup_ui(hwnd); LRESULT(0) }
+        WM_CREATE => { 
+            setup_ui(hwnd); 
+            // Таймер автосохранения (ID 1, каждые 2 секунды)
+            SetTimer(hwnd, 1, 2000, None);
+            LRESULT(0) 
+        }
         WM_SIZE => {
             let (w, h) = ((lparam.0 & 0xFFFF) as i32, ((lparam.0 >> 16) & 0xFFFF) as i32);
             if !HWND_EDIT.0.is_null() { let _ = MoveWindow(HWND_EDIT, 0, 0, w, h, true); }
@@ -100,6 +172,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_SETFOCUS => { if !HWND_EDIT.0.is_null() { let _ = SetFocus(HWND_EDIT); } LRESULT(0) }
         WM_COMMAND => {
+            let notify_code = (wparam.0 >> 16) as u16;
+            let control_id = (wparam.0 & 0xFFFF) as u16;
+
+            // Отслеживаем изменения текста
+            if control_id == ID_EDIT as u16 && notify_code == EN_CHANGE {
+                IS_DIRTY = true;
+            }
+
             match wparam.0 {
                 IDM_OPEN => open_file(hwnd),
                 IDM_SAVE => save_file(hwnd),
@@ -107,6 +187,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 IDM_REGEX_SHOW => show_regex_win(hwnd),
                 IDM_EXIT => { let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)); }
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            if wparam.0 == 1 && IS_DIRTY {
+                save_current_state();
             }
             LRESULT(0)
         }
@@ -118,8 +204,33 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
-        WM_DESTROY => { PostQuitMessage(0); LRESULT(0) }
+        WM_DESTROY => { 
+            save_current_state();
+            // Убираем за собой пустые файлы при закрытии
+            if let Some(file) = FILE_LOCK.take() {
+                drop(file); // Отпускаем лок
+                if let Some(path) = &CURRENT_FILE {
+                    if let Ok(meta) = fs::metadata(path) {
+                        if meta.len() == 0 {
+                            let _ = fs::remove_file(path);
+                        }
+                    }
+                }
+            }
+            PostQuitMessage(0); 
+            LRESULT(0) 
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe fn save_current_state() {
+    if let Some(file) = &mut FILE_LOCK {
+        let text = get_text(HWND_EDIT);
+        let _ = file.set_len(0);
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = file.write_all(text.as_bytes());
+        IS_DIRTY = false;
     }
 }
 
@@ -137,14 +248,28 @@ unsafe fn setup_ui(hwnd: HWND) {
             let _ = SetMenu(hwnd, m);
         }
     }
-    // 🔥 ДОБАВЛЕН ES_NOHIDESEL чтобы выделение не пропадало при потере фокуса
+    
     let mut st = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_NOHIDESEL as u32);
     if !IS_WORD_WRAP { st |= WS_HSCROLL | WINDOW_STYLE(ES_AUTOHSCROLL as u32); }
+    
     if let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("EDIT"), PCWSTR::null(), st, 0, 0, 0, 0, hwnd, HMENU(ID_EDIT as *mut _), inst, None) {
         HWND_EDIT = h;
+        
+        // 🔥 СНИМАЕМ ЛИМИТ СИМВОЛОВ (0 = максимум, ~4 ГБ)
+        SendMessageW(HWND_EDIT, EM_SETLIMITTEXT, WPARAM(0), LPARAM(0));
+        
         update_font();
+
+        // Загружаем текст из темпофайла при старте
+        if let Some(path) = &CURRENT_FILE {
+            if let Ok(content) = fs::read_to_string(path) {
+                set_text(HWND_EDIT, &content);
+            }
+        }
     }
 }
+
+// ... (Остальные функции: show_regex_win, regex_proc, find_next_auto, run_regex, update_font, toggle_word_wrap, open_file, save_file остаются БЕЗ ИЗМЕНЕНИЙ) ...
 
 unsafe fn show_regex_win(hwnd: HWND) {
     if HWND_REGEX_WIN.0.is_null() {
@@ -180,32 +305,15 @@ unsafe extern "system" fn regex_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
 unsafe fn find_next_auto() {
     let (pat, content) = (get_text(HWND_PAT), get_text(HWND_EDIT));
     if pat.is_empty() { return; }
-
-    // Если паттерн изменился, сбрасываем поиск в начало
-    if pat != LAST_PATTERN {
-        LAST_PATTERN = pat.clone();
-        LAST_SEARCH_IDX = 0;
-    }
-
+    if pat != LAST_PATTERN { LAST_PATTERN = pat.clone(); LAST_SEARCH_IDX = 0; }
     if let Ok(re) = Regex::new(&pat) {
-        // Ищем начиная с LAST_SEARCH_IDX (байтовое смещение)
         if let Some(m) = re.find_at(&content, LAST_SEARCH_IDX).or_else(|| re.find(&content)) {
-            // Конвертируем байты в символы UTF-16 для Win32
             let start_char = content[..m.start()].encode_utf16().count();
             let end_char = content[..m.end()].encode_utf16().count();
-
-            // Выделяем и скроллим
             let _ = SendMessageW(HWND_EDIT, EM_SETSEL, WPARAM(start_char), LPARAM(end_char as isize));
             let _ = SendMessageW(HWND_EDIT, EM_SCROLLCARET, WPARAM(0), LPARAM(0));
-            
-            // Переводим фокус на основное окно, чтобы видеть курсор (опционально)
-            // let _ = SetFocus(HWND_EDIT);
-
-            LAST_SEARCH_IDX = m.end(); // Запоминаем байтовую позицию для следующего шага
-        } else {
-            // Если ничего не нашли дальше, сбрасываем индекс для "зацикливания"
-            LAST_SEARCH_IDX = 0;
-        }
+            LAST_SEARCH_IDX = m.end();
+        } else { LAST_SEARCH_IDX = 0; }
     }
 }
 
@@ -248,8 +356,24 @@ unsafe fn open_file(hwnd: HWND) {
 
 unsafe fn save_file(hwnd: HWND) {
     let mut f = [0u16; 260];
-    let mut ofn = OPENFILENAMEW { lStructSize: 152, hwndOwner: hwnd, lpstrFile: PWSTR(f.as_mut_ptr()), nMaxFile: 260, lpstrFilter: w!("Text Files\0*.txt\0All Files\0*.*\0"), nFilterIndex: 1, Flags: OFN_OVERWRITEPROMPT, ..Default::default() };
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: hwnd,
+        lpstrFile: PWSTR(f.as_mut_ptr()),
+        nMaxFile: 260,
+        lpstrFilter: w!("Text Files\0*.txt\0All Files\0*.*\0"),
+        nFilterIndex: 1,
+        
+        lpstrDefExt: w!("txt"), 
+        
+        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
+        ..Default::default()
+    };
+
     if GetSaveFileNameW(&mut ofn).as_bool() {
-        let _ = fs::write(String::from_utf16_lossy(&f).trim_matches(char::from(0)), get_text(HWND_EDIT));
+        let len = f.iter().position(|&c| c == 0).unwrap_or(f.len());
+        let path = String::from_utf16_lossy(&f[..len]);
+        
+        let _ = fs::write(path, get_text(HWND_EDIT));
     }
 }
